@@ -1768,7 +1768,7 @@ comments-platform/
 ├── moderation-service/
 │   ├── Dockerfile
 │   └── .dockerignore
-└── docker-compose.yml
+└── docker-compose.yaml
 ```
 
 Each service has an independent build context and produces its own Docker image.
@@ -1862,7 +1862,7 @@ The Maven Wrapper files and `.mvn/` directory are intentionally preserved becaus
 
 Docker Compose defines and runs multiple containers through a declarative YAML configuration.
 
-The platform uses `docker-compose.yml` to orchestrate:
+The platform uses `docker-compose.yaml` to orchestrate:
 
 - Comment Service.
 - Moderation Service.

@@ -178,7 +178,7 @@ comments-platform/
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── .gitignore
-├── docker-compose.yml
+├── docker-compose.yaml
 └── README.md
 ```
 
