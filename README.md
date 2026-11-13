@@ -56,6 +56,31 @@ sequenceDiagram
     end
 ```
 
+### Docker deployment architecture
+
+The two services can also run independently inside Docker containers, orchestrated by Docker Compose.
+
+```mermaid
+flowchart TB
+    Client["Developer / Postman"]
+
+    subgraph Docker["Docker Compose"]
+        subgraph Network["Internal Docker Network"]
+            CS["Comment Service<br/>Container : 8080"]
+            MS["Moderation Service<br/>Container : 8081"]
+            DB[("H2 In-Memory Database")]
+
+            CS -->|"HTTP / JSON<br/>moderation-service:8081"| MS
+            CS --> DB
+        end
+    end
+
+    Client -->|"localhost:8080"| CS
+    Client -->|"localhost:8081"| MS
+```
+
+The Comment Service communicates with the Moderation Service through Docker's internal DNS, using the service name `moderation-service`.
+
 ## Technology Stack
 
 | Technology | Purpose |
@@ -73,12 +98,16 @@ sequenceDiagram
 | Mockito | Mocking and unit testing |
 | MockMvc | REST controller testing |
 | MockRestServiceServer | HTTP client testing |
+| Docker | Application containerization |
+| Docker Compose | Local multi-container orchestration |
 
 ## Project Structure
 
 ```text
 comments-platform/
 ├── comment-service/
+│   ├── .dockerignore
+│   ├── Dockerfile
 │   └── src/
 │       ├── main/
 │       │   └── java/com/rochacamargovitor/comments/
@@ -112,6 +141,8 @@ comments-platform/
 │                       └── repository/
 │
 ├── moderation-service/
+│   ├── .dockerignore
+│   ├── Dockerfile
 │   └── src/
 │       ├── main/
 │       │   └── java/com/rochacamargovitor/moderation/
@@ -133,7 +164,10 @@ comments-platform/
 │               └── domain/
 │                   └── model/
 │
+├── docs/
+│   └── ARCHITECTURE.md
 ├── .gitignore
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -150,13 +184,20 @@ The `comment-service` contains persistence and an HTTP client for communicating 
 
 ## Prerequisites
 
-- Java 21
+For local execution:
+
+- Java 21 or later
 - Maven Wrapper (included in each service)
 - Git
 
+For containerized execution:
+
+- Docker Engine or Docker Desktop
+- Docker Compose
+
 No external database installation is required for the current implementation.
 
-## Running the Application
+## Running the Application Locally
 
 Both services must be running for the complete comment creation workflow.
 
@@ -197,6 +238,110 @@ moderation.service.base-url=http://localhost:8081
 ```
 
 The HTTP client is configured with a five-second read timeout.
+
+## Running with Docker
+
+The project provides independent Dockerfiles for both microservices and a Docker Compose configuration to orchestrate their execution.
+
+Each service uses a multi-stage Docker build:
+
+1. **Build stage:** uses Maven and JDK 21 to compile and package the application.
+2. **Runtime stage:** uses Java 21 JRE to execute the generated JAR.
+
+This approach separates build-time dependencies from runtime dependencies and avoids including Maven and the application source code in the final runtime image.
+
+### 1. Build and start the containers
+
+From the repository root:
+
+```bash
+docker compose up --build -d
+```
+
+Docker Compose builds the images and starts both services in the background.
+
+### 2. Verify running containers
+
+```bash
+docker compose ps
+```
+
+Both services should appear as running containers.
+
+### 3. Access the services
+
+| Service | Host URL | Container Port |
+|---|---|---:|
+| Comment Service | `http://localhost:8080` | 8080 |
+| Moderation Service | `http://localhost:8081` | 8081 |
+
+### 4. View application logs
+
+```bash
+docker compose logs
+```
+
+To inspect a specific service:
+
+```bash
+docker compose logs comment-service
+docker compose logs moderation-service
+```
+
+### 5. Stop the containers
+
+```bash
+docker compose down
+```
+
+This command stops and removes the containers and the Compose network. The locally built images are not removed.
+
+### Docker networking
+
+Docker Compose creates an internal network shared by both services.
+
+Within this network, containers can communicate using their Compose service names.
+
+The Comment Service uses the following address when running inside Docker:
+
+```text
+http://moderation-service:8081
+```
+
+This configuration is supplied through the environment variable:
+
+```yaml
+MODERATION_SERVICE_BASE_URL: http://moderation-service:8081
+```
+
+Spring Boot maps this environment variable to the property:
+
+```properties
+moderation.service.base-url
+```
+
+When running locally outside Docker, the application uses `localhost:8081` instead.
+
+### Container configuration
+
+The current Compose configuration includes:
+
+- Independent build contexts for each microservice.
+- Separate Docker images.
+- Host-to-container port mappings.
+- Environment-based service configuration.
+- Startup dependency between the services.
+- Automatic restart policy using `unless-stopped`.
+
+The `depends_on` configuration establishes startup order, but does not guarantee that the dependent service is fully ready to receive requests.
+
+### Important: In-memory database
+
+The Comment Service continues to use H2 in-memory, even when running inside Docker.
+
+Database data is not persisted when the application process terminates or the container is recreated.
+
+A persistent database configuration is a potential future improvement.
 
 ## API Reference
 
@@ -353,7 +498,7 @@ This implementation is intentionally deterministic and rule-based. It does not p
 
 ## Error Handling
 
-The Comment Service exposes consistent error responses:
+The Comment Service exposes consistent error responses for application-level exceptions:
 
 ```json
 {
@@ -432,15 +577,16 @@ The implementation favors explicit responsibilities, constructor-based dependenc
 
 It is a pragmatic architecture inspired by Clean Architecture principles, not a strict implementation of every Clean Architecture boundary.
 
-A detailed architectural document will cover the design principles, patterns, trade-offs, and implementation decisions.
+A detailed explanation of the design principles, patterns, trade-offs, and implementation decisions is available in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Future Improvements
 
 Potential improvements include:
 
-- Dockerfiles and Docker Compose for independent containerization.
 - Automated CI pipelines using GitHub Actions.
 - Persistent database configuration for production environments.
+- Container health checks and readiness management.
+- Non-root container execution.
 - Centralized observability and distributed tracing.
 - Correlation IDs across service requests.
 - Circuit breaker and retry strategies.
@@ -448,7 +594,7 @@ Potential improvements include:
 - Authentication and authorization.
 - Deployment automation.
 
-These are planned improvements and are not part of the current implementation.
+These improvements are not part of the current implementation.
 
 ## License
 
