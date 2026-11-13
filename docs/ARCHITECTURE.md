@@ -315,7 +315,9 @@ These capabilities have different responsibilities and rules.
 
 A Bounded Context defines a boundary within which a particular domain model and terminology are valid.
 
-The two services represent separate contexts.
+The two services can be understood as approximating distinct Bounded Contexts because they encapsulate different responsibilities and maintain independent models and contracts.
+
+However, the current project does not implement a comprehensive strategic Domain-Driven Design approach. The separation is primarily based on the distinct business capabilities of comment management and content moderation.
 
 **Comment Service context:**
 
@@ -615,21 +617,21 @@ The principle is concerned with behavioral compatibility.
 
 Inheritance should not be used simply to reuse code.
 
-In this project, the exception hierarchy demonstrates a limited form of subtype substitution:
+In this project, the exception hierarchy demonstrates polymorphic exception handling:
 
 ```text
 RuntimeException
-      |
-      v
+       |
+       v
 ModerationServiceException
-      |
-      v
+       |
+       v
 ModerationTimeoutException
 ```
 
-A timeout exception can be handled as a general moderation service communication exception.
+A timeout exception can be caught and handled as a general moderation service communication exception.
 
-The hierarchy is useful because the application can distinguish a timeout while still treating it as a communication failure.
+This demonstrates a practical use of subtype polymorphism, but it should not be considered sufficient evidence of full Liskov Substitution Principle compliance. LSP requires behavioral substitutability, not merely inheritance.
 
 ## 6.4 Interface Segregation Principle (ISP)
 
@@ -2051,34 +2053,82 @@ These improvements should be introduced according to the operational requirement
 
 CI/CD describes practices for automating software integration, validation, and delivery.
 
+The platform currently implements Continuous Integration using GitHub Actions.
+
 ### 17.1 Continuous Integration
 
-Continuous Integration (CI) automatically validates code changes.
+Continuous Integration (CI) automatically validates code changes whenever developers integrate new work into a shared repository.
 
-A typical pipeline may:
+The platform has a GitHub Actions CI workflow configured in the repository. Once the workflow is pushed to GitHub, it automatically validates code changes triggered by pushes and pull requests targeting the master branch.
 
-1. Check out the repository.
-2. Set up Java.
-3. Build the applications.
-4. Execute tests.
-5. Build Docker images.
-6. Report failures.
+The workflow is defined in:
 
-The platform plans to use GitHub Actions for CI.
+```text
+.github/workflows/ci.yml
+```
 
-### 17.2 Continuous Delivery
+The workflow is triggered by:
 
-Continuous Delivery ensures that software is kept in a deployable state.
+- Push events targeting the `master` branch.
+- Pull requests targeting the `master` branch.
 
-It can include:
+### 17.2 Matrix Strategy
 
-- Build artifacts.
-- Container image creation.
-- Image publishing.
+The workflow uses a GitHub Actions matrix to validate both microservices independently.
+
+The matrix contains:
+
+- `comment-service`
+- `moderation-service`
+
+Each matrix execution receives its own working directory and runs independently.
+
+The `fail-fast: false` configuration allows the remaining service job to continue even if another service fails.
+
+This is useful in a monorepo containing independently buildable applications.
+
+### 17.3 Pipeline Execution
+
+Each service execution performs the following steps:
+
+1. **Checkout repository:** retrieves the source code using `actions/checkout`.
+2. **Set up Java:** configures Eclipse Temurin Java 21 using `actions/setup-java`.
+3. **Maven caching:** reuses downloaded Maven dependencies to reduce build time.
+4. **Run tests:** executes `./mvnw --batch-mode --no-transfer-progress clean verify`.
+5. **Build Docker image:** validates the service Dockerfile using `docker build`.
+
+The Maven verification step validates compilation, test execution, packaging, and configured verification goals.
+
+The Docker build step ensures that each service can be independently containerized.
+
+### 17.4 Pipeline Scope
+
+The current pipeline validates both applications and their Docker build configurations.
+
+It does not currently:
+
+- Publish Docker images to a container registry.
+- Deploy applications to a runtime environment.
+- Execute automated end-to-end tests against both running services.
+- Perform dedicated consumer-driven contract testing.
+- Implement production release approval.
+
+These capabilities may be introduced as the platform evolves.
+
+### 17.5 Continuous Delivery
+
+Continuous Delivery ensures that software remains in a deployable state.
+
+It may include:
+
+- Build artifact publication.
+- Container image publishing.
 - Deployment preparation.
 - Release approval.
 
-### 17.3 Continuous Deployment
+The current project builds Docker images for validation but does not publish or deploy them.
+
+### 17.6 Continuous Deployment
 
 Continuous Deployment automatically releases validated changes to production.
 
@@ -2086,11 +2136,11 @@ It requires additional confidence in testing, monitoring, rollback, and release 
 
 The platform does not currently implement production deployment automation.
 
-### 17.4 CI vs. CD
+### 17.7 CI vs. CD
 
 | Practice | Main objective |
 |---|---|
-| CI | Automatically validate code changes |
+| Continuous Integration | Automatically validate code changes |
 | Continuous Delivery | Keep software ready for release |
 | Continuous Deployment | Automatically release validated changes |
 
@@ -2248,6 +2298,31 @@ Each service produces its own Docker image. Compose defines their build contexts
 - No persistent database storage in the current H2 in-memory implementation.
 - No readiness checks or production orchestration guarantees in the current Compose configuration.
 
+### 18.8 Decision: Independent CI Validation for Each Microservice
+
+**Context:** The repository contains two independently buildable and deployable Spring Boot applications.
+
+**Decision:** Use GitHub Actions with a matrix strategy to execute the CI pipeline independently for each microservice.
+
+**Alternatives:**
+
+- A single Maven build at the repository root.
+- A single CI job containing sequential builds.
+- Independent workflows for each microservice.
+- A shared matrix-based workflow.
+
+**Consequences:**
+
+- Independent validation of each service.
+- Parallel execution of CI jobs.
+- Reduced workflow duplication.
+- Failures can be identified at the service level.
+- Each service retains its own Maven build lifecycle.
+- Docker image creation is validated independently.
+- GitHub-hosted runner execution introduces CI infrastructure dependency.
+
+The workflow validates builds and Docker images but does not publish images or deploy applications.
+
 ## 19. Current Architecture — Summary
 
 The platform can be represented through two complementary architectural views.
@@ -2300,12 +2375,17 @@ flowchart TB
 
     subgraph COMPOSE["Docker Compose"]
         subgraph NETWORK["Internal Docker Network"]
-            CS["Comment Service Container<br/>Port 8080"]
-            MS["Moderation Service Container<br/>Port 8081"]
-            DB[("H2 In-Memory Database")]
-            
+            subgraph COMMENT["Comment Service Container"]
+                CS["Comment Service Application<br/>Port 8080"]
+                DB[("H2 In-Memory Database")]
+                CS -->|"JPA / Hibernate"| DB
+            end
+
+            subgraph MODERATION["Moderation Service Container"]
+                MS["Moderation Service Application<br/>Port 8081"]
+            end
+
             CS -->|"HTTP / JSON<br/>moderation-service:8081"| MS
-            CS -->|"JPA / Hibernate"| DB
         end
     end
 
@@ -2342,11 +2422,12 @@ Both views are necessary to understand the complete system.
 | API documentation | README and architecture documentation | OpenAPI / Swagger |
 | Authentication | Not implemented | OAuth2 / JWT |
 | Observability | Application logs | Metrics and distributed tracing |
-| Containerization | Independent multi-stage Dockerfiles | Image scanning, optimization, and publishing |
+| Containerization | Independent Dockerfiles and Docker Compose | Health checks, non-root execution, and resource limits |
 | Container orchestration | Docker Compose | Kubernetes or another orchestration platform when justified |
 | Container health checks | Not implemented | Docker health checks and readiness management |
 | Container security | Basic runtime image using Java 21 JRE | Non-root execution and vulnerability scanning |
-| CI | Planned | GitHub Actions |
+| Docker image validation | Images built independently in CI | Container registry publishing |
+| CI | GitHub Actions with independent matrix jobs for both services | Additional quality gates and security scanning |
 | CD | Not implemented | Deployment automation when a target environment is selected |
 | Contract testing | Focused HTTP client tests | Consumer-driven contract tests |
 | E2E testing | Manual Postman validation | Automated multi-service tests |

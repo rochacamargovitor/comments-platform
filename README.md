@@ -17,15 +17,18 @@ A comment is persisted only after it has been approved by the Moderation Service
 
 ```mermaid
 flowchart LR
-    Client[API Client / Postman]
+    Client["API Client / Postman"]
 
     subgraph Platform["Comments Platform"]
-        CS["Comment Service<br/>Port 8080"]
+        subgraph CommentService["Comment Service"]
+            CS["REST API<br/>Port 8080"]
+            DB[("H2 In-Memory Database")]
+            CS -->|"JPA / Hibernate"| DB
+        end
+
         MS["Moderation Service<br/>Port 8081"]
-        DB[("H2 Database")]
 
         CS -->|"POST /api/moderate<br/>HTTP / JSON"| MS
-        CS -->|"JPA / Hibernate"| DB
     end
 
     Client -->|"REST API"| CS
@@ -66,12 +69,17 @@ flowchart TB
 
     subgraph Docker["Docker Compose"]
         subgraph Network["Internal Docker Network"]
-            CS["Comment Service<br/>Container : 8080"]
-            MS["Moderation Service<br/>Container : 8081"]
-            DB[("H2 In-Memory Database")]
+            subgraph Comment["Comment Service Container"]
+                CS["Comment Service Application<br/>Port 8080"]
+                DB[("H2 In-Memory Database")]
+                CS -->|"JPA / Hibernate"| DB
+            end
+
+            subgraph Moderation["Moderation Service Container"]
+                MS["Moderation Service Application<br/>Port 8081"]
+            end
 
             CS -->|"HTTP / JSON<br/>moderation-service:8081"| MS
-            CS --> DB
         end
     end
 
@@ -164,6 +172,9 @@ comments-platform/
 │               └── domain/
 │                   └── model/
 │
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── .gitignore
@@ -546,6 +557,35 @@ Connection settings:
 
 Each microservice has its own independent test suite.
 
+## Continuous Integration
+
+The project has a GitHub Actions CI workflow configured in the repository to automatically validate changes to both microservices once the repository is pushed to GitHub.
+
+The workflow is defined in:
+
+```text
+.github/workflows/ci.yml
+```
+
+The pipeline runs on:
+
+- Pushes to the `master` branch.
+- Pull requests targeting the `master` branch.
+
+Each microservice is validated independently through a GitHub Actions matrix.
+
+For each service, the workflow performs:
+
+1. Repository checkout.
+2. Java 21 setup using Eclipse Temurin.
+3. Maven dependency caching.
+4. Automated tests and build verification using `./mvnw clean verify`.
+5. Docker image build validation.
+
+The pipeline builds Docker images locally on the GitHub Actions runner. It does not publish images to a container registry or deploy applications.
+
+Each microservice has its own independent CI execution, allowing failures to be identified separately.
+
 ### Comment Service
 
 ```bash
@@ -583,16 +623,15 @@ A detailed explanation of the design principles, patterns, trade-offs, and imple
 
 Potential improvements include:
 
-- Automated CI pipelines using GitHub Actions.
 - Persistent database configuration for production environments.
-- Container health checks and readiness management.
-- Non-root container execution.
 - Centralized observability and distributed tracing.
 - Correlation IDs across service requests.
 - Circuit breaker and retry strategies.
 - API documentation using OpenAPI.
 - Authentication and authorization.
-- Deployment automation.
+- Automated end-to-end and contract testing.
+- Docker health checks and non-root container execution.
+- Container image publishing and deployment automation.
 
 These improvements are not part of the current implementation.
 
