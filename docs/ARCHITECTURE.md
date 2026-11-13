@@ -1726,13 +1726,17 @@ The current project is a learning and portfolio application and should not be co
 
 Docker provides a platform for packaging applications and their dependencies into containers.
 
-A container packages an application with the runtime environment required to execute it.
+A container packages an application with the runtime environment required to execute it, helping ensure consistent behavior across different environments.
+
+The Comments Platform uses Docker to containerize both microservices and Docker Compose to orchestrate their local execution.
 
 ### 16.1 Image vs. Container
 
-An image is an immutable template used to create containers.
+A Docker image is an immutable template used to create containers.
 
-A container is a running or stopped instance of an image.
+A container is an isolated runtime instance created from an image.
+
+The relationship can be represented as:
 
 ```text
 Dockerfile
@@ -1744,41 +1748,191 @@ Docker Image
 Docker Container
 ```
 
-### 16.2 Dockerfile
+The Dockerfile defines how the image is built. The image contains the application and its runtime dependencies, while the container represents the running application instance.
 
-A Dockerfile describes how to build an application image.
+### 16.2 Independent Containerization
 
-A typical Java service image includes:
+Each microservice has its own Dockerfile and `.dockerignore` file.
 
-- A Java runtime.
-- The compiled application artifact.
-- Runtime configuration.
-- The application startup command.
+This reflects the independent application boundaries already established by the Maven projects.
 
-The platform plans to have independent Dockerfiles for each service.
+Current Docker artifacts:
 
-### 16.3 Docker Compose
+```text
+comments-platform/
+├── comment-service/
+│   ├── Dockerfile
+│   └── .dockerignore
+├── moderation-service/
+│   ├── Dockerfile
+│   └── .dockerignore
+└── docker-compose.yml
+```
 
-Docker Compose defines and runs multiple containers through a declarative configuration.
+Each service has an independent build context and produces its own Docker image.
 
-The platform can use Compose to start:
+Current image names:
+
+- `comments-platform/comment-service:1.0.0`
+- `comments-platform/moderation-service:1.0.0`
+
+This allows each application to be built and containerized independently.
+
+### 16.3 Multi-Stage Docker Builds
+
+Both services use multi-stage Docker builds.
+
+A multi-stage build separates the environment required to build an application from the environment required to execute it.
+
+The Dockerfiles define two stages.
+
+**Build stage:**
+
+```dockerfile
+FROM maven:3.9.11-eclipse-temurin-21 AS build
+
+WORKDIR /app
+
+COPY .mvn/ .mvn/
+COPY mvnw pom.xml ./
+
+RUN chmod +x mvnw
+
+COPY src/ src/
+
+RUN ./mvnw clean package -DskipTests
+```
+
+This stage uses Maven and JDK 21 to compile and package the application into an executable JAR.
+
+**Runtime stage:**
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+
+WORKDIR /app
+
+COPY --from=build /app/target/*.jar app.jar
+
+EXPOSE 8080
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+The Moderation Service uses the same approach but exposes container port `8081`.
+
+The runtime stage uses a Java Runtime Environment (JRE), rather than the complete JDK and Maven build environment.
+
+Only the generated application artifact is copied from the build stage.
+
+**Benefits of multi-stage builds:**
+
+- Smaller runtime images compared with images containing the complete build toolchain.
+- Separation between build-time and runtime dependencies.
+- Reduced unnecessary tooling in the runtime environment.
+- More explicit and reproducible build instructions.
+
+The Docker build uses `-DskipTests`, which skips test execution during image packaging. It does not mean that tests are not part of the development workflow. Each service has an independent Maven test suite, and automated CI validation is a planned next step.
+
+### 16.4 Docker Build Context and .dockerignore
+
+A Docker build context is the set of files made available to the Docker build process.
+
+Each service uses its own directory as the build context.
+
+The `.dockerignore` file excludes unnecessary files from that context.
+
+Current exclusions include:
+
+- `target/`
+- `.git/`
+- `.idea/`
+- IntelliJ module files.
+- Local logs.
+- Environment files.
+- Temporary operating system files.
+
+This avoids sending unnecessary local artifacts to the Docker build process.
+
+The Maven Wrapper files and `.mvn/` directory are intentionally preserved because the build stage uses them to package the application.
+
+### 16.5 Docker Compose
+
+Docker Compose defines and runs multiple containers through a declarative YAML configuration.
+
+The platform uses `docker-compose.yml` to orchestrate:
 
 - Comment Service.
 - Moderation Service.
 
-Compose can also define service networking and environment variables.
+The configuration defines:
 
-### 16.4 Container Networking
+- Independent build contexts.
+- Docker image names and tags.
+- Host-to-container port mappings.
+- Environment variables.
+- Service startup dependencies.
+- Restart policies.
 
-Containers in the same Docker Compose network can communicate using service names.
+The services can be started together with:
 
-For example:
-
-```properties
-moderation.service.base-url=http://moderation-service:8081
+```bash
+docker compose up --build -d
 ```
 
-This differs from local execution, where the URL is:
+The `--build` option requests image builds before starting the containers, while `-d` runs them in detached mode.
+
+Container status can be inspected with:
+
+```bash
+docker compose ps
+```
+
+Application logs can be inspected with:
+
+```bash
+docker compose logs
+```
+
+The containers and Compose network can be stopped and removed with:
+
+```bash
+docker compose down
+```
+
+This command does not remove the locally built images.
+
+### 16.6 Container Networking and Service Discovery
+
+Docker Compose creates a network shared by the services.
+
+Containers attached to the same Compose network can communicate using their service names.
+
+The Comment Service communicates with the Moderation Service using:
+
+```text
+http://moderation-service:8081
+```
+
+The hostname `moderation-service` is resolved through Docker's internal DNS.
+
+This is service discovery within the Compose network.
+
+It avoids hardcoding a container IP address, which may change when containers are recreated.
+
+The configuration is supplied through an environment variable:
+
+```yaml
+MODERATION_SERVICE_BASE_URL: http://moderation-service:8081
+```
+
+Spring Boot maps this environment variable to the application property:
+
+```properties
+moderation.service.base-url
+```
+
+The application uses a different URL during local execution outside Docker:
 
 ```properties
 moderation.service.base-url=http://localhost:8081
@@ -1786,16 +1940,110 @@ moderation.service.base-url=http://localhost:8081
 
 The runtime configuration must match the execution environment.
 
-### 16.5 Health Checks
+### 16.7 Published Ports vs. Internal Container Communication
 
-A health check verifies whether an application is ready or functioning.
+The Compose configuration publishes the service ports:
 
-A production-oriented container setup should distinguish between:
+| Service | Host port | Container port |
+|---|---:|---:|
+| Comment Service | 8080 | 8080 |
+| Moderation Service | 8081 | 8081 |
 
-- Liveness: whether the application is alive.
-- Readiness: whether the application is ready to receive requests.
+Port publishing allows clients running on the host machine, such as Postman, to access the containers through `localhost`.
 
-Health checks help orchestration systems manage application instances.
+For example:
+
+```text
+http://localhost:8080
+http://localhost:8081
+```
+
+However, communication between the containers does not need to go through the host machine.
+
+The Comment Service communicates directly with the Moderation Service through the internal Docker network:
+
+```text
+Comment Service
+       |
+       | HTTP
+       v
+moderation-service:8081
+```
+
+This distinction is important:
+
+- Published ports provide access from outside the Docker network.
+- Internal service communication uses Docker networking and service-name resolution.
+
+### 16.8 Startup Order vs. Service Readiness
+
+The Compose configuration uses `depends_on` to establish a startup dependency.
+
+The Comment Service depends on the Moderation Service.
+
+This establishes the requested startup order, but the default `depends_on` behavior does not guarantee that the Moderation Service is fully initialized and ready to receive HTTP requests.
+
+A container can be running while its application is still starting.
+
+This distinction is known as startup order versus readiness.
+
+A more advanced configuration could introduce:
+
+- Docker health checks.
+- Application readiness endpoints.
+- Health-based dependency conditions.
+- Retry or resilience mechanisms.
+
+These mechanisms are not currently implemented in the project.
+
+### 16.9 Restart Policies
+
+Both services use:
+
+```yaml
+restart: unless-stopped
+```
+
+This instructs Docker to restart containers after certain termination events unless they have been explicitly stopped by the user or administrator.
+
+A restart policy improves basic runtime continuity, but it does not replace application health checks, monitoring, or orchestration-level recovery strategies.
+
+### 16.10 Database Persistence and Container Lifecycle
+
+The Comment Service currently uses an H2 in-memory database.
+
+Although the service runs inside a Docker container, the database is not configured with a persistent Docker volume.
+
+The database exists in the application process memory.
+
+Consequently:
+
+- Restarting the application process loses the in-memory data.
+- Recreating the container loses the in-memory data.
+- Removing the container also removes its writable container filesystem.
+
+A Docker volume alone would not make an H2 in-memory database persistent.
+
+A future implementation could migrate to a persistent database such as PostgreSQL and configure an appropriate Docker volume for its data directory.
+
+This would separate database persistence from the lifecycle of the application container.
+
+### 16.11 Container Security and Operational Improvements
+
+The current Docker implementation provides independent images and container execution, but it is intentionally minimal.
+
+Potential improvements include:
+
+- Running the application with a non-root user.
+- Defining container health checks.
+- Adding resource limits.
+- Using image tags based on release versions or immutable digests.
+- Scanning images for known vulnerabilities.
+- Managing secrets outside the image and source code.
+- Using a persistent database.
+- Automating image publishing and deployment.
+
+These improvements should be introduced according to the operational requirements of the target environment.
 
 ---
 
@@ -1813,7 +2061,8 @@ A typical pipeline may:
 2. Set up Java.
 3. Build the applications.
 4. Execute tests.
-5. Report failures.
+5. Build Docker images.
+6. Report failures.
 
 The platform plans to use GitHub Actions for CI.
 
@@ -1844,8 +2093,6 @@ The platform does not currently implement production deployment automation.
 | CI | Automatically validate code changes |
 | Continuous Delivery | Keep software ready for release |
 | Continuous Deployment | Automatically release validated changes |
-
----
 
 # Part XIV — Architectural Decisions and Evolution
 
@@ -1975,9 +2222,39 @@ ADRs are useful because they preserve the reasoning behind technical choices.
 
 ---
 
+### 18.7 Decision: Independent Docker Images and Docker Compose
+
+**Context:** Both microservices must be independently executable and deployable, while also supporting a simple local environment in which they communicate with each other.
+
+**Decision:** Provide an independent multi-stage Dockerfile for each microservice and use Docker Compose to orchestrate their local execution.
+
+Each service produces its own Docker image. Compose defines their build contexts, ports, environment configuration, networking, startup dependency, and restart policy.
+
+**Alternatives:**
+
+- Execute both services directly on the host machine.
+- Build a single image containing both applications.
+- Use a container orchestration platform such as Kubernetes.
+- Use Docker Compose with independent service images.
+
+**Consequences:**
+
+- Independent application containerization.
+- Consistent Java runtime environment.
+- Simplified local multi-service execution.
+- Internal service discovery through Docker DNS.
+- Environment-specific configuration through environment variables.
+- Additional operational complexity compared with running both applications directly on the host.
+- No persistent database storage in the current H2 in-memory implementation.
+- No readiness checks or production orchestration guarantees in the current Compose configuration.
+
 ## 19. Current Architecture — Summary
 
-The platform can be represented as follows:
+The platform can be represented through two complementary architectural views.
+
+### 19.1 Logical Architecture
+
+The following diagram illustrates the current logical organization of the services:
 
 ```mermaid
 flowchart TB
@@ -2011,13 +2288,50 @@ This diagram illustrates the current implementation's logical organization.
 
 It is not a claim that all dependencies strictly follow Clean Architecture's Dependency Rule.
 
-In particular, the Comment Service application layer directly depends on the Spring Data repository abstraction.
+In particular, the Comment Service application layer directly depends on the Spring Data repository abstraction and the Moderation Client infrastructure component.
+
+### 19.2 Container Deployment Architecture
+
+The following diagram represents how the services are executed using Docker Compose:
+
+```mermaid
+flowchart TB
+    CLIENT["Developer / Postman"]
+
+    subgraph COMPOSE["Docker Compose"]
+        subgraph NETWORK["Internal Docker Network"]
+            CS["Comment Service Container<br/>Port 8080"]
+            MS["Moderation Service Container<br/>Port 8081"]
+            DB[("H2 In-Memory Database")]
+            
+            CS -->|"HTTP / JSON<br/>moderation-service:8081"| MS
+            CS -->|"JPA / Hibernate"| DB
+        end
+    end
+
+    CLIENT -->|"localhost:8080"| CS
+    CLIENT -->|"localhost:8081"| MS
+```
+
+The deployment architecture has the following characteristics:
+
+- Each microservice has its own Dockerfile and Docker image.
+- Docker Compose builds and starts both services.
+- The services share an internal Docker network.
+- The Comment Service resolves the Moderation Service through the Compose service name `moderation-service`.
+- Host ports `8080` and `8081` are published for external API access.
+- The Comment Service uses an H2 in-memory database.
+- No persistent database volume is configured.
+
+The logical architecture describes the organization of software responsibilities, while the deployment architecture describes how the applications execute and communicate at runtime.
+
+Both views are necessary to understand the complete system.
 
 ## 20. Current Implementation vs. Future Improvements
 
 | Capability | Current implementation | Potential evolution |
 |---|---|---|
-| Service architecture | Two independent services | Additional services when justified |
+| Service architecture | Two independent Spring Boot services | Additional services when justified |
 | Communication | Synchronous REST | Messaging for asynchronous workflows |
 | HTTP client | Spring RestClient | Resilience libraries and policies |
 | Timeout | Five-second read timeout | Per-operation timeout policies |
@@ -2025,16 +2339,21 @@ In particular, the Comment Service application layer directly depends on the Spr
 | Retry | Not implemented | Controlled retry policies |
 | Persistence | H2 in-memory | PostgreSQL |
 | Database ownership | Comment Service owns persistence | Independent persistent storage per service |
-| API documentation | README | OpenAPI / Swagger |
+| API documentation | README and architecture documentation | OpenAPI / Swagger |
 | Authentication | Not implemented | OAuth2 / JWT |
 | Observability | Application logs | Metrics and distributed tracing |
-| Containerization | Planned | Docker and Docker Compose |
+| Containerization | Independent multi-stage Dockerfiles | Image scanning, optimization, and publishing |
+| Container orchestration | Docker Compose | Kubernetes or another orchestration platform when justified |
+| Container health checks | Not implemented | Docker health checks and readiness management |
+| Container security | Basic runtime image using Java 21 JRE | Non-root execution and vulnerability scanning |
 | CI | Planned | GitHub Actions |
 | CD | Not implemented | Deployment automation when a target environment is selected |
 | Contract testing | Focused HTTP client tests | Consumer-driven contract tests |
 | E2E testing | Manual Postman validation | Automated multi-service tests |
 
----
+The current implementation prioritizes simplicity and independent execution.
+
+Future improvements should be introduced based on actual requirements rather than adopting additional infrastructure without a clear need.
 
 ## 21. Conclusion
 
